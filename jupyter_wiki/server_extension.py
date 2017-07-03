@@ -17,10 +17,21 @@ class AppmodeHandler(IPythonHandler):
 
         #path = path.strip('/')
         #self.log.info('Wiki get: %s', path)
-        model = self.get_json_body()
-        action = model['action']
+        data = self.get_json_body()
+        action = data['action']
+        path = data['path']
+        cm = self.contents_manager
+        full_path = cm._get_os_path(path)
 
-        self.finish(json.dumps({"success": False, "message": "bla blah"}))
+        if action == "aquire_lock":
+            os.chmod(full_path, 0o100664) # '-rw-rw-r--'
+            self.finish(json.dumps({"success": True, "message": ""}))
+        elif action == "release_lock":
+            os.chmod(full_path, 0o100444) # '-r--r--r--'
+            self.finish(json.dumps({"success": True, "message": ""}))
+        else:
+            msg = "Unknown action "+action
+            self.finish(json.dumps({"success": False, "message": msg}))
 
         # if action == "lock":
         #     path = model['path']

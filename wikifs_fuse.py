@@ -40,7 +40,7 @@ class WikiFS(LoggingMixIn, Operations):
         assert(path[0]=="/")
         parts = path[1:].split("/")
 
-        # ignore hidden files
+        # ignore hidden files and directories
         if any([p[0]=="." for p in parts]):
             return False
 
@@ -48,7 +48,7 @@ class WikiFS(LoggingMixIn, Operations):
         if parts[-1][-1] == "~":
             return False
 
-        # only files starting with "_"
+        # only accept files starting with "_"
         return parts[-1][0] == "_"
 
     #===========================================================================
@@ -134,7 +134,7 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def chmod(self, path, mode):
-        #TODO handle executable bit properly (notified to server as well)
+        #TODO handle executable bit properly (notified the server as well)
         full_path = self._full_path(path)
 
         if not self._is_wiki(path):

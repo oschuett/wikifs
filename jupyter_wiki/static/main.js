@@ -60,7 +60,17 @@ define([
 
     //==========================================================================
     var on_wiki_edit = function () {
-        var data = {'action':'lock', 'path': Jupyter.notebook.notebook_path};
+        perform_action("aquire_lock");
+    };
+
+    //==========================================================================
+    var on_wiki_publish = function () {
+        perform_action("release_lock");
+    };
+
+    //==========================================================================
+    var perform_action = function (action) {
+        var data = {'action':action, 'path': Jupyter.notebook.notebook_path};
 
         var settings = {
             processData : false,
@@ -78,18 +88,13 @@ define([
                 if(data['success']){
                     location.reload();
                 }else{
-                    show_message("Locking failed", data['message']);
+                    show_message("Error", data['message']);
                 }
             },
             function(error) {
-                show_message("Locking failed", error);
+                show_message("Error", error);
             }
         );
-    };
-
-    //==========================================================================
-    var on_wiki_publish = function () {
-                show_dialog();
     };
 
     //==========================================================================
@@ -133,7 +138,6 @@ define([
             console.log("Wiki: waiting for notebook to load.");
             events.one('notebook_loaded.Notebook', notebook_loaded);
         }
-
 
     //    //TODO insert before #help_menu
     //    var $menubar = $('.navbar-nav');
