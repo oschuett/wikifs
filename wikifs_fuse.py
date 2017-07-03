@@ -70,7 +70,6 @@ class WikiFS(LoggingMixIn, Operations):
     # non-mandatory routines which we do not implement
     chown = None
     mknod = None
-    acccess = None
     readlink = None
     symlink = None
     link = None
@@ -78,6 +77,20 @@ class WikiFS(LoggingMixIn, Operations):
     utimens = None
     getxattr = None
     listxattr = None
+
+    #===========================================================================
+    def access(self, path, mode):
+        mask = 0
+        if bool(mode & os.R_OK):
+            mask += stat.S_IRUSR
+        if bool(mode & os.W_OK):
+            mask += stat.S_IWUSR
+        if bool(mode & os.X_OK):
+            mask += stat.S_IXUSR
+
+        st = self.getattr(path)
+        if (st['st_mode'] & mask) != mask:
+            raise FuseOSError(EACCES)
 
     #===========================================================================
     def readdir(self, path, fh):
@@ -121,6 +134,7 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def chmod(self, path, mode):
+        #TODO handle executable bit properly (notified to server as well)
         full_path = self._full_path(path)
 
         if not self._is_wiki(path):
@@ -183,6 +197,10 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def rename(self, old_path, new_path):
+
+        #TODO preserve handle executable bit
+        #TODO preserve locking state
+
         old_is_wiki = self._is_wiki(old_path)
         new_is_wiki = self._is_wiki(new_path)
         old_full_path = self._full_path(old_path)
