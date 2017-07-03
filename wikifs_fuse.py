@@ -34,12 +34,26 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def _is_wiki(self, path):
-        bn = os.path.basename(path)
-        return len(bn)>0 and bn[0] == "_"
+        if path[-1] == "/":
+            return False # a directory
+
+        assert(path[0]=="/")
+        parts = path[1:].split("/")
+
+        # ignore hidden files
+        if any([p[0]=="." for p in parts]):
+            return False
+
+        # ignore temporary files
+        if parts[-1][-1] == "~":
+            return False
+
+        # only files starting with "_"
+        return parts[-1][0] == "_"
 
     #===========================================================================
     def _request(self, action, path, data=None):
-        #print("request: "+action)
+        print("request: "+action)
         url = self.server_url + "/" + action
         headers = {"Authorization": self.auth_token}
         if data==None:
@@ -82,6 +96,7 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def getattr(self, path, fh=None):
+        #TODO handle directories separately, would also simplify _is_wiki
         #TODO overwrite uid and gid
         if self._is_wiki(path):
             answer = self._request("getattr", path).json()
@@ -153,7 +168,7 @@ class WikiFS(LoggingMixIn, Operations):
     def _download_file(self, path):
        full_path = self._full_path(path)
        if os.path.exists(full_path):
-           os.chmod(full_path, 0o100664) # '-rw-rw-r--' 
+           os.chmod(full_path, 0o100664) # '-rw-rw-r--'
        resp = self._request("download", path)
        content = b64decode(resp.content)
        f = open(full_path, "wb")
@@ -188,16 +203,19 @@ class WikiFS(LoggingMixIn, Operations):
 
         else:
             # we map this into a copy (sacrificing atomicity)
+            f_old = self.open(old_path, os.O_RDONLY)
+            f_new = self.create(new_path, 0o100664) # '-rw-rw-r--'
 
-            # read content from old_path
-            f = self.open(old_path, os.O_RDONLY)
-            content = self.read(old_path, 0, 0, f)
-            self.release(old_path, f)
-
-            # write content to new_path
-            f = self.create(new_path, os.O_WRONLY)
-            self.write(new_path, content, 0, f)
-            self.release(new_path, f)
+            offset = 0
+            while True:
+                content = self.read(old_path, size=4096, offset=offset, fh=f_old)
+                if len(content)==0:
+                    break # end of file reach
+                self.write(new_path, content, offset, f_new)
+                offset += len(content)
+                print("Copied: "+str(content))
+            self.release(old_path, f_old)
+            self.release(new_path, f_new)
 
             # remove old_path
             self.unlink(old_path)

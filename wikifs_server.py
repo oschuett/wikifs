@@ -181,6 +181,8 @@ def api_upload():
     f.write(content)
     f.close()
 
+    print("Wrote: "+str(content))
+
     return("Ok")
 
 #===============================================================================
@@ -234,27 +236,35 @@ def git_commit_file(path):
 
     # make a git commit, if needed
     commit_msg = None
-    devnull = open(os.devnull, 'w')
-    cmd = ["git", "ls-files", "--error-unmatch", full_path]
-    file_tracked = subprocess.call(cmd, stdout=devnull, stderr=devnull, cwd=app.config['WIKIFS_ROOT'])
-    if file_tracked != 0:
-        commit_msg = "New "+path
-    else:
+    if git_file_tracked(path):
         cmd = ["git", "diff-index", "--quiet", "HEAD", full_path]
         has_changed = subprocess.call(cmd, cwd=app.config['WIKIFS_ROOT'])
         if has_changed != 0:
             commit_msg = "Edit "+path
+    else:
+         commit_msg = "New "+path
 
     if commit_msg:
         subprocess.check_call(["git", "add", full_path], cwd=app.config['WIKIFS_ROOT'])
         subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
 
 #===============================================================================
-def git_remove_file(path):
-    commit_msg = "Remove "+path
+def git_file_tracked(path):
     full_path = to_full_path(path)
-    subprocess.check_call(["git", "rm", "-f", full_path], cwd=app.config['WIKIFS_ROOT'])
-    subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
+    cmd = ["git", "ls-files", "--error-unmatch", full_path]
+    devnull = open("/dev/null", "w")
+    file_tracked = subprocess.call(cmd, stdout=devnull, stderr=devnull, cwd=app.config['WIKIFS_ROOT'])
+    return file_tracked == 0
+
+#===============================================================================
+def git_remove_file(path):
+    full_path = to_full_path(path)
+    if git_file_tracked(path):
+        commit_msg = "Remove "+path
+        subprocess.check_call(["git", "rm", "-f", full_path], cwd=app.config['WIKIFS_ROOT'])
+        subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
+    else:
+        os.remove(full_path)
 
 #===============================================================================
 def git_rename_file(old_path, new_path):
