@@ -55,8 +55,7 @@ def api_getattr():
     full_path = to_full_path(path)
 
     if not os.path.exists(full_path):
-        #abort(404)
-        return ("{}")
+        abort(404)
 
     st = os.lstat(full_path)
     answer = dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
@@ -70,75 +69,109 @@ def api_getattr():
     return json.dumps(answer)
 
 #===============================================================================
-@app.route('/wikifs/aquire_lock')
+@app.route('/wikifs/chmod', methods=['POST'])
 @token_required
-def api_aquire_lock():
+def api_chmod():
     path = request.args["path"]
-
-    if user_has_lock(path):
-        # TODO update lock timestamp
-        return json.dumps({'new_grant': False})
-
-    # create new lock
-    aquire_lock(path)
-    return json.dumps({'new_grant': True})
-
-
-#===============================================================================
-@app.route('/wikifs/release_lock')
-@token_required
-def api_release_lock():
-    path = request.args["path"]
-    if user_has_lock(path):
-        git_commit_file(path)
+    mode = request.get_json()['mode']
+    want_lock = bool(mode & 0o000222)  # '?-w--w--w-'
+    if want_lock:
+        aquire_lock(path)
+    else:
         release_lock(path)
 
-    return("Ok")
+    return json.dumps({})
+
+    #TODO handle executable bit properly (might require a commit)
 
 #===============================================================================
-@app.route('/wikifs/check_lock')
+@app.route('/wikifs/create')
 @token_required
-def api_check_lock():
+def api_create():
     path = request.args["path"]
-    answer = {'lock_is_yours': user_has_lock(path)}
-    return json.dumps(answer)
+
+    aquire_lock(path)
+    full_path = to_full_path(path)
+    open(full_path, "w")
+
+    return json.dumps({})
+
+##===============================================================================
+#@app.route('/wikifs/aquire_lock')
+#@token_required
+#def api_aquire_lock():
+#    path = request.args["path"]
+#    new_path = request.get_json()['mode']
+#    if user_has_lock(path):
+#        # TODO update lock timestamp
+#        return json.dumps({'new_grant': False})
+#
+#    # create new lock
+#    aquire_lock(path)
+#    return json.dumps({'new_grant': True})
+#
+#
+##===============================================================================
+#@app.route('/wikifs/release_lock')
+#@token_required
+#def api_release_lock():
+#    path = request.args["path"]
+#    if user_has_lock(path):
+#        git_commit_file(path)
+#        release_lock(path)
+#
+#    return("Ok")
+
+##===============================================================================
+#@app.route('/wikifs/check_lock')
+#@token_required
+#def api_check_lock():
+#    path = request.args["path"]
+#    answer = {'lock_is_yours': user_has_lock(path)}
+#    return json.dumps(answer)
 
 #===============================================================================
 @app.route('/wikifs/remove')
 @token_required
 def api_remove():
     path = request.args["path"]
+
+    full_path = to_full_path(path)
+    if not os.path.exists(full_path):
+        abort(404)
+
     try:
         aquire_lock(path)
         git_remove_file(path)
     finally:
         release_lock(path)
 
-    return("Ok")
+    return json.dumps({})
 
 #===============================================================================
 @app.route('/wikifs/rename', methods=['POST'])
 @token_required
 def api_rename():
     old_path = request.args["path"]
-    new_path = request.get_data().decode("utf-8")
+    new_path = request.get_json()['new_path']
     print("new_path: "+new_path)
 
     try:
+        had_lock = user_has_lock(old_path)
         aquire_lock(old_path)
         aquire_lock(new_path)
 
-        # commit changes before renameing
-        git_commit_file(old_path)
-        git_commit_file(new_path)
-
         git_rename_file(old_path, new_path)
 
-    finally:
+        release_lock(old_path)
+        if not had_lock:
+            release_lock(new_path)
+
+    except:
         release_lock(old_path)
         release_lock(new_path)
 
-    return("Ok")
+    return json.dumps({})
 
 #===============================================================================
 @app.route('/wikifs/readdir')
@@ -162,8 +195,14 @@ def api_download():
         abort(404)
 
     content = open(full_path, 'rb').read()
-    answer = b64encode(content)
-    return(answer)
+    answer = {'content': b64encode(content)}
+    answer['lock_is_yours'] = user_has_lock(path)
+    if user_has_lock(path):
+        answer['st_mode'] = 0o100664 # '-rw-rw-r--'
+    else:
+        answer['st_mode'] = 0o100444 # '-r--r--r--'
+
+    return(json.dumps(answer))
 
 
 #===============================================================================
@@ -176,14 +215,14 @@ def api_upload():
     assert user_has_lock(path)
 
     # write file
-    content = b64decode(request.get_data())
+    content = b64decode(request.get_json()['content'])
     f = open(full_path, "wb")
     f.write(content)
     f.close()
 
     print("Wrote: "+str(content))
 
-    return("Ok")
+    return(json.dumps({}))
 
 #===============================================================================
 def to_lock_path(path):

@@ -14,7 +14,8 @@ import requests
 from base64 import b64decode, b64encode
 
 import configparser
-
+import tempfile
+import shutil
 
 
 #===============================================================================
@@ -25,6 +26,7 @@ class WikiFS(LoggingMixIn, Operations):
         self.server_url = server_url
         self.auth_token = auth_token
         self.rwlock = Lock()
+        self.mirror = {}
 
     #===========================================================================
     def _full_path(self, path):
@@ -52,18 +54,81 @@ class WikiFS(LoggingMixIn, Operations):
         return parts[-1][0] == "_"
 
     #===========================================================================
-    def _request(self, action, path, data=None):
+    def _request(self, action, path, json=None):
         print("request: "+action)
         url = self.server_url + "/" + action
         headers = {"Authorization": self.auth_token}
-        if data==None:
+        if json==None:
             resp = requests.get(url, params={'path':path}, headers=headers)
         else:
-            resp = requests.post(url, params={'path':path}, headers=headers, data=data)
+            resp = requests.post(url, params={'path':path}, headers=headers, json=json)
+
+        if resp.status_code == 404:
+            raise FuseOSError(errno.ENOENT) # No such file or directory
+
+        #raise FuseOSError(errno.EACCES) # Permission denied
+        #raise FuseOSError(errno.EBUSY) # Device or resource busy
+        #raise FuseOSError(errno.EIO) # I/O error
+        #raise FuseOSError(errno.EREMOTEIO) # Remote I/O error
+
         resp.raise_for_status()
         # TODO maybe raise more meaning full error FuseOSError(errno.ENOENT)
         # TODO make error message available as log file, e.g. "/.wikifs.log"
-        return resp
+        return resp.json()
+
+    #===========================================================================
+    def _mirror_path(self, path):
+        if not self._is_wiki(path):
+            return self._full_path(path)
+
+        with self.rwlock:
+            # create new mirror if needed
+            if path not in self.mirror.keys():
+                tmp_f, tmp_fn = tempfile.mkstemp()
+                os.close(tmp_f)
+                print("new mirror "+tmp_fn + "  -> "+path)
+                self.mirror[path] = {'tmp_fn':tmp_fn, 'mtime':None, 'refs':0}
+
+            # update mirror
+            entry = self.mirror[path]
+            tmp_fn = entry['tmp_fn']
+            answer = self._request("download", path)
+            if entry['mtime']==None or answer['lock_is_yours']==False:
+                # update file content and mode
+                os.chmod(tmp_fn, 0o100664) # '-rw-rw-r--'
+                content = b64decode(answer['content'])
+                open(tmp_fn, "wb").write(content)
+                os.chmod(tmp_fn, answer['st_mode'])
+                entry['mtime'] = os.lstat(tmp_fn).st_mtime
+
+            entry['refs'] += 1
+            return tmp_fn
+
+    #===========================================================================
+    def _release_mirror(self, path):
+        if not self._is_wiki(path):
+            return
+
+        with self.rwlock:
+            # check for changes
+            entry = self.mirror[path]
+            tmp_fn = entry['tmp_fn']
+            st = os.lstat(tmp_fn)
+            is_dirty = st.st_mtime != entry['mtime']
+
+            # upload file content, if needed
+            if is_dirty:
+                content = open(tmp_fn, "rb").read()
+                self._request("upload", path, json={"content":b64encode(content)})
+                entry['mtime'] = os.lstat(tmp_fn).st_mtime
+                # The server may ignore the update.
+                # This will get corrected upon the next _mirror_path() call.
+
+            # remove usused mirror
+            entry['refs'] -= 1
+            if entry['refs'] == 0:
+                self.mirror.pop(path)
+                os.remove(entry['tmp_fn'])
 
     #===========================================================================
     #https://www.cs.hmc.edu/~geoff/classes/hmc.cs135.201001/homework/fuse/fuse_doc.html
@@ -80,25 +145,18 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def access(self, path, mode):
-        mask = 0
-        if bool(mode & os.R_OK):
-            mask += stat.S_IRUSR
-        if bool(mode & os.W_OK):
-            mask += stat.S_IWUSR
-        if bool(mode & os.X_OK):
-            mask += stat.S_IXUSR
-
-        st = self.getattr(path)
-        if (st['st_mode'] & mask) != mask:
-            raise FuseOSError(EACCES)
+        try:
+            mirror_path = self._mirror_path(path)
+            os.access(mirror_path, mode)
+        finally:
+            self._release_mirror(path)
 
     #===========================================================================
     def readdir(self, path, fh):
         entries = set(['.', '..'])
         full_path = self._full_path(path)
-        resp = self._request("readdir", path)
-        resp.raise_for_status()
-        entries.update(resp.json())
+        answer = self._request("readdir", path)
+        entries.update(answer)
 
         # create directory locally
         if not os.path.exists(full_path):
@@ -111,11 +169,9 @@ class WikiFS(LoggingMixIn, Operations):
     def getattr(self, path, fh=None):
         #TODO handle directories separately, would also simplify _is_wiki
         #TODO overwrite uid and gid
+        #TODO handle directories which only exist on the server
         if self._is_wiki(path):
-            answer = self._request("getattr", path).json()
-            if not answer:
-                raise FuseOSError(errno.ENOENT)
-            return answer
+            return self._request("getattr", path)
 
         full_path = self._full_path(path)
         st = os.lstat(full_path)
@@ -126,121 +182,77 @@ class WikiFS(LoggingMixIn, Operations):
     #===========================================================================
     def create(self, path, mode):
         if self._is_wiki(path):
-            self._request("aquire_lock", path)
-            self._request("upload", path, data=b64encode(b""))
-
-        full_path = self._full_path(path)
-        return os.open(full_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            #TODO ensure check that if mode request write permissions
+            #TODO currently uses two http calls
+            self._request("create", path)
+            mirror_path = self._mirror_path(path)
+            return os.open(mirror_path, os.O_WRONLY | os.O_TRUNC)
+        else:
+            full_path = self._full_path(path)
+            return os.open(full_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
 
     #===========================================================================
     def chmod(self, path, mode):
-        #TODO handle executable bit properly (notified the server as well)
-        full_path = self._full_path(path)
-
-        if not self._is_wiki(path):
-            return os.chmod(full_path, mode)
-
-        want_lock = bool(mode & 0o000222)  # '?-w--w--w-'
-        if want_lock:
-            answer = self._request("aquire_lock", path).json()
-            if answer['new_grant']:
-                self._download_file(path)
-            # make file writable so that it is later uploaded by release()
-            os.chmod(full_path, 0o100664) # '-rw-rw-r--'
+        if self._is_wiki(path):
+            self._request("chmod", path, json={"mode":mode})
         else:
-            self._request("release_lock", path)
-            if os.path.exists(full_path):
-                os.chmod(full_path, 0o100444) # '-r--r--r--'
+            full_path = self._full_path(path)
+            return os.chmod(full_path, mode)
 
     #===========================================================================
     def open(self, path, flags):
-        full_path = self._full_path(path)
+        mirror_path = self._mirror_path(path)
+        return os.open(mirror_path, flags)
 
-        if self._is_wiki(path):
-            # explicitly check lock in case it got revoked
-            resp = self._request("check_lock", path)
-            locked = resp.json()['lock_is_yours']
-
-            if not locked:
-                self._download_file(path)
-                os.chmod(full_path, 0o100444) # '-r--r--r--'
-
-        return os.open(full_path, flags)
+    #===========================================================================
+    def truncate(self, path, length, fh=None):
+        mirror_path = self._mirror_path(path)
+        with open(mirror_path, 'r+') as f:
+            f.truncate(length)
+        self._release_mirror(path)
 
     #===========================================================================
     def release(self, path, fh):
-        if self._is_wiki(path):
-            full_path = self._full_path(path)
-            st = os.lstat(full_path)
-            writable = bool(st.st_mode & 0o000222)  # '?-w--w--w-'
-            if writable:
-                self._upload_file(path)
-
-        return os.close(fh)
-
-    #===========================================================================
-    def _download_file(self, path):
-       full_path = self._full_path(path)
-       if os.path.exists(full_path):
-           os.chmod(full_path, 0o100664) # '-rw-rw-r--'
-       resp = self._request("download", path)
-       content = b64decode(resp.content)
-       f = open(full_path, "wb")
-       f.write(content)
-       f.close()
-
-    #===========================================================================
-    def _upload_file(self, path):
-        full_path = self._full_path(path)
-        content = open(full_path, "rb").read()
-        self._request("upload", path, data=b64encode(content))
+        os.close(fh)
+        self._release_mirror(path)
 
     #===========================================================================
     def rename(self, old_path, new_path):
-
-        #TODO preserve handle executable bit
-        #TODO preserve locking state
-
         old_is_wiki = self._is_wiki(old_path)
         new_is_wiki = self._is_wiki(new_path)
-        old_full_path = self._full_path(old_path)
-        new_full_path = self._full_path(new_path)
 
-        if not old_is_wiki and not new_is_wiki:
-            # just a local move
-            os.rename(old_full_path, new_full_path)
+        assert old_path not in self.mirror.keys()
+        assert new_path not in self.mirror.keys()
 
-        elif old_is_wiki and new_is_wiki:
+        if old_is_wiki and new_is_wiki:
             # rename on server
-            self._request("rename", old_path, data=new_path.encode("utf-8"))
-            if os.path.exists(new_full_path):
-                os.remove(new_full_path)
-            if os.path.exists(old_full_path):
-                os.rename(old_full_path, new_full_path)
-                os.chmod(new_full_path, 0o100444) # '-r--r--r--'
+            self._request("rename", old_path, json={"new_path":new_path})
+
+        elif not old_is_wiki and not new_is_wiki:
+           # just a local move
+           old_full_path = self._full_path(old_path)
+           new_full_path = self._full_path(new_path)
+           os.rename(old_full_path, new_full_path)
 
         else:
-            # we map this into a copy (sacrificing atomicity)
-            f_old = self.open(old_path, os.O_RDONLY)
-            f_new = self.create(new_path, 0o100664) # '-rw-rw-r--'
+            # move between wiki and local
 
-            offset = 0
-            while True:
-                content = self.read(old_path, size=4096, offset=offset, fh=f_old)
-                if len(content)==0:
-                    break # end of file reach
-                self.write(new_path, content, offset, f_new)
-                offset += len(content)
-                print("Copied: "+str(content))
-            self.release(old_path, f_old)
-            self.release(new_path, f_new)
+            # first ensure that new_path can be created
+            mode = self.getattr(old_path)['st_mode']
+            fh = self.create(new_path, mode)
+            self.release(new_path, fh)
 
-            # remove old_path
+            # then make new_path writable and copy content
+            self.chmod(new_path, 0o100664) # '-rw-rw-r--'
+            mirror_old = self._mirror_path(old_path)
+            mirror_new = self._mirror_path(new_path)
+            shutil.copyfile(mirror_old, mirror_new)
+            self._release_mirror(old_path)
+            self._release_mirror(new_path)
+
+            # then restore mode and remove old_path
+            self.chmod(new_path, mode)
             self.unlink(old_path)
-
-            # release lock on new_path
-            self.chmod(new_path, 0o100444) # '-r--r--r--'
-
 
     #===========================================================================
     def mkdir(self, path, mode):
@@ -255,11 +267,11 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def unlink(self, path):
-        full_path = self._full_path(path)
         if self._is_wiki(path):
+            assert path not in self.mirror.keys()
             self._request("remove", path)
-
-        if(os.path.exists(full_path)):
+        else:
+            full_path = self._full_path(path)
             os.unlink(full_path)
 
     #===========================================================================
@@ -273,12 +285,6 @@ class WikiFS(LoggingMixIn, Operations):
         with self.rwlock:
             os.lseek(fh, offset, 0)
             return os.write(fh, data)
-
-    #===========================================================================
-    def truncate(self, path, length, fh=None):
-        full_path = self._full_path(path)
-        with open(full_path, 'r+') as f:
-            f.truncate(length)
 
     #===========================================================================
     def flush(self, path, fh):
