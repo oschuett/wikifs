@@ -161,7 +161,7 @@ class WikiFS(LoggingMixIn, Operations):
         if key=="wikifs_error":
             return self.errors.get(path, "").encode("utf-8")
         else:
-            raise FuseOSError(errno.ENOATTR)
+            raise FuseOSError(errno.ENODATA)
 
     #===========================================================================
     def listxattr(self, path):
