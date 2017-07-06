@@ -257,8 +257,9 @@ def git_commit_file(path):
 
     if commit_msg:
         author = '--author="'+current_user['git_author']+'"'
+        env = {"GIT_COMMITTER_NAME": "JupyterWiki", "GIT_COMMITTER_EMAIL": "info@jupyterwiki.org"}
         subprocess.check_call(["git", "add", full_path], cwd=wikifs_root())
-        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=wikifs_root())
+        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=wikifs_root(), env=env)
 
 #===============================================================================
 def git_file_tracked(path):
@@ -274,8 +275,9 @@ def git_remove_file(path):
     if git_file_tracked(path):
         commit_msg = "Remove "+path
         author = '--author="'+current_user['git_author']+'"'
+        env = {"GIT_COMMITTER_NAME": "JupyterWiki", "GIT_COMMITTER_EMAIL": "info@jupyterwiki.org"}
         subprocess.check_call(["git", "rm", "-f", full_path], cwd=wikifs_root())
-        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=wikifs_root())
+        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=wikifs_root(), env=env)
     else:
         os.remove(full_path)
 
@@ -286,8 +288,9 @@ def git_rename_file(old_path, new_path):
     if git_file_tracked(old_path):
         commit_msg = "Rename "+old_path+" -> "+new_path
         author = '--author="'+current_user['git_author']+'"'
+        env = {"GIT_COMMITTER_NAME": "JupyterWiki", "GIT_COMMITTER_EMAIL": "info@jupyterwiki.org"}
         subprocess.check_call(["git", "mv", "-f", old_full_path, new_full_path], cwd=wikifs_root())
-        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=wikifs_root())
+        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=wikifs_root(), env=env)
     else:
         print("rename: "+old_full_path + " -> "+new_full_path)
         os.rename(old_full_path, new_full_path)
