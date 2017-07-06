@@ -107,7 +107,7 @@ class WikiFS(LoggingMixIn, Operations):
             if entry['mtime']==None or answer['lock_is_yours']==False:
                 # update file content and mode
                 os.chmod(tmp_fn, 0o100664) # '-rw-rw-r--'
-                content = b64decode(answer['content']).decode("utf-8")
+                content = b64decode(answer['content'].encode("utf-8"))
                 open(tmp_fn, "wb").write(content)
                 os.chmod(tmp_fn, answer['st_mode'])
                 st = os.lstat(tmp_fn)
@@ -132,7 +132,7 @@ class WikiFS(LoggingMixIn, Operations):
             # upload file content, if needed
             if is_dirty:
                 content = open(tmp_fn, "rb").read()
-                self._request("upload", path, json={"content":b64encode(content).encode("utf-8")})
+                self._request("upload", path, json={"content":b64encode(content).decode("utf-8")})
                 entry['mtime'] = os.lstat(tmp_fn).st_mtime
                 # The server may ignore the update.
                 # This will get corrected upon the next _mirror_path() call.

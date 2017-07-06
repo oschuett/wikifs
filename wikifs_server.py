@@ -164,7 +164,7 @@ def api_download():
         abort(404)
 
     content = open(full_path, 'rb').read()
-    answer = {'content': b64encode(content).encode("utf-8")}
+    answer = {'content': b64encode(content).decode("utf-8")}
     answer['lock_is_yours'] = user_has_lock(path)
     if user_has_lock(path):
         answer['st_mode'] = 0o100664 # '-rw-rw-r--'
@@ -185,7 +185,7 @@ def api_upload():
         abort(403, "File %s not locked"%path) # Forbidden
 
     # write file
-    content = b64decode(request.get_json()['content']).decode("utf-8")
+    content = b64decode(request.get_json()['content'].encode("utf-8"))
     f = open(full_path, "wb")
     f.write(content)
     f.close()
