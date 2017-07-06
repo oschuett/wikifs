@@ -26,9 +26,9 @@ def token_required(func):
     def decorated_view(*args, **kwargs):
         global current_user, userdb
         current_user = None
-        if "Authorization" not in request.headers:
+        if "Wikifs-Authorization" not in request.headers:
             return abort(401)
-        token = request.headers["Authorization"]
+        token = request.headers["Wikifs-Authorization"]
 
         if not userdb or token not in userdb.keys():
             reload_userdb() # reload userdb and check again.

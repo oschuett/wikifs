@@ -58,7 +58,7 @@ class WikiFS(LoggingMixIn, Operations):
     def _request(self, action, path, json=None):
         print("request: "+action)
         url = self.server_url + "/" + action
-        headers = {"Authorization": self.auth_token}
+        headers = {"Wikifs-Authorization": self.auth_token}
         if json==None:
             resp = requests.get(url, params={'path':path}, headers=headers)
         else:
