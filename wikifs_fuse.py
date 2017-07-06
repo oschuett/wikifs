@@ -158,8 +158,10 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def getxattr(self, path, key):
-        assert key=="wikifs_error"
-        return self.errors.get(path, "").encode("utf-8")
+        if key=="wikifs_error":
+            return self.errors.get(path, "").encode("utf-8")
+        else:
+            raise FuseOSError(errno.ENOATTR)
 
     #===========================================================================
     def listxattr(self, path):
