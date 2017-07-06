@@ -16,7 +16,7 @@ from base64 import b64decode, b64encode
 import configparser
 import tempfile
 import shutil
-
+import re
 
 #===============================================================================
 class WikiFS(LoggingMixIn, Operations):
@@ -27,6 +27,7 @@ class WikiFS(LoggingMixIn, Operations):
         self.auth_token = auth_token
         self.rwlock = Lock()
         self.mirror = {}
+        self.errors = {}
 
     #===========================================================================
     def _full_path(self, path):
@@ -63,17 +64,27 @@ class WikiFS(LoggingMixIn, Operations):
         else:
             resp = requests.post(url, params={'path':path}, headers=headers, json=json)
 
-        if resp.status_code == 404:
-            raise FuseOSError(errno.ENOENT) # No such file or directory
+        if resp.status_code != 200: # Ok
+            # something went wrong, save error message
+            #print(resp.text)
+            m = re.search("<p>([^<]*)</p>",resp.text)
+            if m:
+                self.errors[path] = m.group(1)
+            else:
+                self.errors[path] = "Something went wrong"
 
-        #raise FuseOSError(errno.EACCES) # Permission denied
-        #raise FuseOSError(errno.EBUSY) # Device or resource busy
-        #raise FuseOSError(errno.EIO) # I/O error
-        #raise FuseOSError(errno.EREMOTEIO) # Remote I/O error
+            # translate http status codes into linux error numbers
+            if resp.status_code == 404: # Not Found
+                raise FuseOSError(errno.ENOENT) # No such file or directory
+            elif resp.status_code == 403: # Forbidden
+                raise FuseOSError(errno.EACCES) # Permission denied
+            elif resp.status_code == 409: # Conflict
+                raise FuseOSError(errno.EEXIST) # File exists
+            elif resp.status_code == 410:  # Gone
+                raise FuseOSError(errno.EBUSY) # Device or resource busy
+            else:
+                raise FuseOSError(errno.EREMOTEIO) # Remote I/O error
 
-        resp.raise_for_status()
-        # TODO maybe raise more meaning full error FuseOSError(errno.ENOENT)
-        # TODO make error message available as log file, e.g. "/.wikifs.log"
         return resp.json()
 
     #===========================================================================
@@ -87,7 +98,7 @@ class WikiFS(LoggingMixIn, Operations):
                 tmp_f, tmp_fn = tempfile.mkstemp()
                 os.close(tmp_f)
                 print("new mirror "+tmp_fn + "  -> "+path)
-                self.mirror[path] = {'tmp_fn':tmp_fn, 'mtime':None, 'refs':0}
+                self.mirror[path] = {'tmp_fn':tmp_fn, 'mtime':None, 'size':0, 'refs':0}
 
             # update mirror
             entry = self.mirror[path]
@@ -99,7 +110,9 @@ class WikiFS(LoggingMixIn, Operations):
                 content = b64decode(answer['content'])
                 open(tmp_fn, "wb").write(content)
                 os.chmod(tmp_fn, answer['st_mode'])
-                entry['mtime'] = os.lstat(tmp_fn).st_mtime
+                st = os.lstat(tmp_fn)
+                entry['mtime'] = st.st_mtime
+                entry['size'] = st.st_size
 
             entry['refs'] += 1
             return tmp_fn
@@ -114,7 +127,7 @@ class WikiFS(LoggingMixIn, Operations):
             entry = self.mirror[path]
             tmp_fn = entry['tmp_fn']
             st = os.lstat(tmp_fn)
-            is_dirty = st.st_mtime != entry['mtime']
+            is_dirty = st.st_mtime!=entry['mtime'] or st.st_size!=entry['size']
 
             # upload file content, if needed
             if is_dirty:
@@ -140,16 +153,25 @@ class WikiFS(LoggingMixIn, Operations):
     link = None
     statfs = None
     utimens = None
-    getxattr = None
-    listxattr = None
+#    getxattr = None
+#    listxattr = None
+
+    #===========================================================================
+    def getxattr(self, path, key):
+        assert key=="wikifs_error"
+        return self.errors.get(path, "").encode("utf-8")
+
+    #===========================================================================
+    def listxattr(self, path):
+        return ["wikifs_error"]
 
     #===========================================================================
     def access(self, path, mode):
-        try:
-            mirror_path = self._mirror_path(path)
-            os.access(mirror_path, mode)
-        finally:
-            self._release_mirror(path)
+        mirror_path = self._mirror_path(path)
+        has_access = os.access(mirror_path, mode)
+        self._release_mirror(path)
+        if not has_access:
+            raise FuseOSError(errno.EACCES)
 
     #===========================================================================
     def readdir(self, path, fh):
@@ -218,6 +240,7 @@ class WikiFS(LoggingMixIn, Operations):
 
     #===========================================================================
     def rename(self, old_path, new_path):
+        print("=============== RENAME START =====================")
         old_is_wiki = self._is_wiki(old_path)
         new_is_wiki = self._is_wiki(new_path)
 
@@ -238,6 +261,7 @@ class WikiFS(LoggingMixIn, Operations):
             # move between wiki and local
 
             # first ensure that new_path can be created
+            #TODO what if new_path already exists, then it should get overwritten
             mode = self.getattr(old_path)['st_mode']
             fh = self.create(new_path, mode)
             self.release(new_path, fh)
@@ -246,7 +270,9 @@ class WikiFS(LoggingMixIn, Operations):
             self.chmod(new_path, 0o100664) # '-rw-rw-r--'
             mirror_old = self._mirror_path(old_path)
             mirror_new = self._mirror_path(new_path)
+            print("copy file "+mirror_old+" -> "+mirror_new)
             shutil.copyfile(mirror_old, mirror_new)
+            print("got: "+open(mirror_new).read())
             self._release_mirror(old_path)
             self._release_mirror(new_path)
 
@@ -254,6 +280,7 @@ class WikiFS(LoggingMixIn, Operations):
             self.chmod(new_path, mode)
             self.unlink(old_path)
 
+        print("=============== RENAME END =====================")
     #===========================================================================
     def mkdir(self, path, mode):
         #TODO: assert that directory has valid name

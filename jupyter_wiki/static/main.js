@@ -25,22 +25,27 @@ define([
     }
 
     //==========================================================================
-    function notebook_loaded() {
+    function setup_notebook() {
+        console.log("jupyterwiki: setup notebook");
         //alert(Jupyter.notebook.notebook_path);
-        var is_wiki = is_wiki_path(Jupyter.notebook.notebook_path);
 
+        // remove old buttons
+        var group_name = "jupyterwiki_btn_group";
+        $("#"+group_name).remove();
+
+        var is_wiki = is_wiki_path(Jupyter.notebook.notebook_path);
         if(!is_wiki)
             return // nothing todo
 
         if(!Jupyter.notebook.writable){
-            Jupyter.toolbar.add_buttons_group(["jupyter_wiki:edit"]);
+            Jupyter.toolbar.add_buttons_group(["jupyter_wiki:edit"], group_name);
              // disable code editing
              //TODO: make really read only, block create/remove of cells
              //$('.CodeMirror').each(function() {
              //    this.CodeMirror.setOption('readOnly', "nocursor");
              //});
         }else{
-            Jupyter.toolbar.add_buttons_group(["jupyter_wiki:publish"]);
+            Jupyter.toolbar.add_buttons_group(["jupyter_wiki:publish"], group_name);
         }
 
         // Rules:
@@ -130,13 +135,15 @@ define([
         };
         Jupyter.actions.register(action_publish, "publish", "jupyter_wiki");
 
+        events.one('notebook_renamed.Notebook', setup_notebook);
+
         // init stuff once notebook is loaded
         if (Jupyter.notebook && Jupyter.notebook._fully_loaded) {
             console.log("Wiki: notebook already loaded.");
-            notebook_loaded();
+            setup_notebook();
         }else{
             console.log("Wiki: waiting for notebook to load.");
-            events.one('notebook_loaded.Notebook', notebook_loaded);
+            events.one('notebook_loaded.Notebook', setup_notebook);
         }
 
     //    //TODO insert before #help_menu

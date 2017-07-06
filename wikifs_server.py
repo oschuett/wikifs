@@ -37,15 +37,9 @@ def token_required(func):
 #===============================================================================
 def reload_userdb():
     global userdb
-    fn = os.path.join(app.config['WIKIFS_ROOT'], "users.db")
+    fn = os.path.join(app.config['WIKIFS_ROOT'], "userdb.json")
     print("reloading user database from: "+fn)
-    userdb = {}
-    for line in open(fn).readlines():
-        line = line.strip()
-        if not line: co
-        if not line or line[0]=="#": continue
-        username, auth_token = line.split()
-        userdb[auth_token] = username
+    userdb = json.load(open(fn))
 
 #===============================================================================
 @app.route('/wikifs/getattr')
@@ -77,7 +71,8 @@ def api_chmod():
     want_lock = bool(mode & 0o000222)  # '?-w--w--w-'
     if want_lock:
         aquire_lock(path)
-    else:
+    elif user_has_lock(path):
+        git_commit_file(path)
         release_lock(path)
 
     return json.dumps({})
@@ -90,45 +85,14 @@ def api_chmod():
 def api_create():
     path = request.args["path"]
 
-    aquire_lock(path)
     full_path = to_full_path(path)
+    if os.path.exists(full_path):
+        abort(409, "File %s already exists."%path) # Conflict
+
+    aquire_lock(path)
     open(full_path, "w")
 
     return json.dumps({})
-
-##===============================================================================
-#@app.route('/wikifs/aquire_lock')
-#@token_required
-#def api_aquire_lock():
-#    path = request.args["path"]
-#    new_path = request.get_json()['mode']
-#    if user_has_lock(path):
-#        # TODO update lock timestamp
-#        return json.dumps({'new_grant': False})
-#
-#    # create new lock
-#    aquire_lock(path)
-#    return json.dumps({'new_grant': True})
-#
-#
-##===============================================================================
-#@app.route('/wikifs/release_lock')
-#@token_required
-#def api_release_lock():
-#    path = request.args["path"]
-#    if user_has_lock(path):
-#        git_commit_file(path)
-#        release_lock(path)
-#
-#    return("Ok")
-
-##===============================================================================
-#@app.route('/wikifs/check_lock')
-#@token_required
-#def api_check_lock():
-#    path = request.args["path"]
-#    answer = {'lock_is_yours': user_has_lock(path)}
-#    return json.dumps(answer)
 
 #===============================================================================
 @app.route('/wikifs/remove')
@@ -156,20 +120,20 @@ def api_rename():
     new_path = request.get_json()['new_path']
     print("new_path: "+new_path)
 
-    try:
-        had_lock = user_has_lock(old_path)
-        aquire_lock(old_path)
-        aquire_lock(new_path)
+    #try:
+    had_lock = user_has_lock(old_path)
+    aquire_lock(old_path)
+    aquire_lock(new_path)
 
-        git_rename_file(old_path, new_path)
+    git_rename_file(old_path, new_path)
 
-        release_lock(old_path)
-        if not had_lock:
-            release_lock(new_path)
-
-    except:
-        release_lock(old_path)
+    release_lock(old_path)
+    if not had_lock:
         release_lock(new_path)
+
+    #finally:
+    #    release_lock(old_path)
+    #    release_lock(new_path)
 
     return json.dumps({})
 
@@ -212,7 +176,8 @@ def api_upload():
     path = request.args["path"]
     full_path = to_full_path(path)
 
-    assert user_has_lock(path)
+    if not user_has_lock(path):
+        abort(403, "File %s not locked"%path) # Forbidden
 
     # write file
     content = b64decode(request.get_json()['content'])
@@ -220,7 +185,7 @@ def api_upload():
     f.write(content)
     f.close()
 
-    print("Wrote: "+str(content))
+    #print("Wrote: "+str(content))
 
     return(json.dumps({}))
 
@@ -229,7 +194,7 @@ def to_lock_path(path):
     full_path = to_full_path(path)
     dn = os.path.dirname(full_path)
     bn = os.path.basename(full_path)
-    assert(bn[0]=="_") # make sure it's a wiki path
+    assert bn[0] == "_" # make sure it's a wiki path
     lock_fn = dn + "/LOCK_" + bn[1:]
     return lock_fn
 
@@ -238,8 +203,8 @@ def user_has_lock(path):
     lock_path = to_lock_path(path)
     if not os.path.exists(lock_path):
         return False
-    lock_user = open(lock_path).read()
-    return lock_user == current_user
+    lock_user = open(lock_path).read().strip()
+    return lock_user == current_user['username']
 
 #===============================================================================
 def aquire_lock(path):
@@ -249,7 +214,9 @@ def aquire_lock(path):
     lock_path = to_lock_path(path)
 
     # lock available?
-    assert not os.path.exists(lock_path)
+    if os.path.exists(lock_path):
+        username = open(lock_path).read().strip()
+        abort(410, "File %s already locked by user %s."%(path, username)) # Gone
 
     # create directory if it does not exist
     d = os.path.dirname(lock_path)
@@ -258,7 +225,7 @@ def aquire_lock(path):
 
     # create new lock
     f = open(lock_path, "w")
-    f.write(current_user)
+    f.write(current_user['username']+"\n")
     f.close()
 
 #===============================================================================
@@ -284,8 +251,9 @@ def git_commit_file(path):
          commit_msg = "New "+path
 
     if commit_msg:
+        author = '--author="'+current_user['git_author']+'"'
         subprocess.check_call(["git", "add", full_path], cwd=app.config['WIKIFS_ROOT'])
-        subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
+        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
 
 #===============================================================================
 def git_file_tracked(path):
@@ -300,18 +268,24 @@ def git_remove_file(path):
     full_path = to_full_path(path)
     if git_file_tracked(path):
         commit_msg = "Remove "+path
+        author = '--author="'+current_user['git_author']+'"'
         subprocess.check_call(["git", "rm", "-f", full_path], cwd=app.config['WIKIFS_ROOT'])
-        subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
+        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
     else:
         os.remove(full_path)
 
 #===============================================================================
 def git_rename_file(old_path, new_path):
-    commit_msg = "Rename "+old_path+" -> "+new_path
     old_full_path = to_full_path(old_path)
     new_full_path = to_full_path(new_path)
-    subprocess.check_call(["git", "mv", "-f", old_full_path, new_full_path], cwd=app.config['WIKIFS_ROOT'])
-    subprocess.check_call(["git", "commit", "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
+    if git_file_tracked(old_path):
+        commit_msg = "Rename "+old_path+" -> "+new_path
+        author = '--author="'+current_user['git_author']+'"'
+        subprocess.check_call(["git", "mv", "-f", old_full_path, new_full_path], cwd=app.config['WIKIFS_ROOT'])
+        subprocess.check_call(["git", "commit", author, "-m", commit_msg], cwd=app.config['WIKIFS_ROOT'])
+    else:
+        print("rename: "+old_full_path + " -> "+new_full_path)
+        os.rename(old_full_path, new_full_path)
 
 #===============================================================================
 if __name__ == "__main__":
