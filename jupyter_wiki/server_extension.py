@@ -37,7 +37,7 @@ class AppmodeHandler(IPythonHandler):
         except:
             pass
 
-        # Ok, something went wrong let's try to retrieve error message
+        # Ok, something went wrong let's try to retrieve an error message
         try:
             err_msg = xattr.getxattr(full_path, "wikifs_error")
         except:
